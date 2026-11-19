@@ -111,6 +111,15 @@
   .typing span { width:6px; height:6px; border-radius:50%; background:var(--muted); animation:blink 1.1s infinite; }
   .typing span:nth-child(2) { animation-delay:.15s; } .typing span:nth-child(3) { animation-delay:.3s; }
   @keyframes blink { 0%, 80%, 100% { opacity:.25; } 40% { opacity:1; } }
+  /* typewriter caret at the end of the text being revealed */
+  .streaming > :last-child::after,
+  .streaming > :is(ul, ol):last-child > li:last-child::after {
+    content:""; display:inline-block; width:2px; height:1.05em; margin-left:2px; vertical-align:-0.15em;
+    background:var(--accent); border-radius:1px; animation:caret 1s steps(1) infinite;
+  }
+  .streaming > :is(ul, ol, table):last-child::after { content:none; }
+  @keyframes caret { 50% { opacity:0; } }
+  .bot .bubble.fade-in .sources { animation:in .35s ease; }
 
   /* Composer */
   .dock {
@@ -209,6 +218,49 @@ function renderSources(sources, answer) {
   }).join('') + '</div>';
 }
 
+// Smooth typewriter: buffers streamed text and reveals it at an adaptive pace.
+function typewriter(el) {
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let target = '', pos = 0, last = 0, ended = false, raf = 0, stopped = false, resolve;
+  const finished = new Promise(r => (resolve = r));
+  const nearBottom = () => window.innerHeight + window.scrollY >= document.body.scrollHeight - 120;
+
+  function safeCut(n) {
+    // don't show a half-written markdown link like "[Name](https://wa"
+    // or a raw label like "[Name": links appear whole once they've fully arrived
+    const s = target.slice(0, n), lb = s.lastIndexOf('[');
+    if (lb < 0 || (s.lastIndexOf(')') > lb && s.indexOf('](', lb) >= 0)) return n;
+    const rest = target.slice(lb), m = rest.match(/^\[[^\]\n]*\]\([^)\s]*\)/);
+    if (m) return lb + m[0].length;                       // complete link available → show it whole
+    if (/^\[[^\]\n]*\](?!\()/.test(rest) && rest.length > rest.indexOf(']') + 1) return n; // not a link
+    return lb;                                            // link still arriving → hold before "["
+  }
+  function render(n) {
+    const stick = nearBottom();
+    el.classList.add('streaming');
+    el.innerHTML = md(target.slice(0, n));
+    if (stick) window.scrollTo(0, document.body.scrollHeight);
+  }
+  function frame(t) {
+    if (stopped) return;
+    const dt = last ? Math.min(t - last, 64) : 16; last = t;
+    const backlog = target.length - pos;
+    const cps = Math.max(55, backlog * 1.6);          // speed up when far behind (~0.6s max lag)
+    pos = Math.min(target.length, pos + cps * dt / 1000);
+    const n = safeCut(Math.floor(pos));
+    render(n);
+    if (ended && pos >= target.length) { el.classList.remove('streaming'); raf = 0; resolve(); return; }
+    raf = requestAnimationFrame(frame);
+  }
+  const kick = () => { if (!raf && !stopped) { last = 0; raf = requestAnimationFrame(frame); } };
+  return {
+    push(s) { target += s; if (reduce) { pos = target.length; render(pos); } else kick(); },
+    end() { ended = true; if (reduce || !target) { el.classList.remove('streaming'); resolve(); } else kick(); },
+    stop() { stopped = true; cancelAnimationFrame(raf); el.classList.remove('streaming'); resolve(); },
+    finished,
+  };
+}
+
 async function ask(text) {
   text = text.trim(); if (!text || busy) return;
   busy = true; hero.hidden = true; newBtn.hidden = false;
@@ -216,6 +268,7 @@ async function ask(text) {
   q.value = ''; autosize();
   const b = addRow('bot', '<div class="typing"><span></span><span></span><span></span></div>');
   let answer = '', sources = [], buf = '';
+  const tw = typewriter(b);
   try {
     const r = await fetch('api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: history }) });
     if (!r.ok && (r.headers.get('content-type') || '').includes('json')) throw new Error((await r.json()).error || 'Request failed');
@@ -229,15 +282,19 @@ async function ask(text) {
         if (!line.trim()) continue;
         const ev = JSON.parse(line);
         if (ev.sources) sources = ev.sources;
-        if (ev.delta) { answer += ev.delta; b.innerHTML = md(answer); scrollDown(); }
+        if (ev.delta) { answer += ev.delta; tw.push(ev.delta); }
         if (ev.error) throw new Error(ev.error);
       }
     }
     if (!answer) throw new Error('No answer came back — please try again.');
     history.push({ role: 'assistant', content: answer });
+    tw.end();
+    await tw.finished;
+    b.classList.add('fade-in');
     b.innerHTML = md(answer) + renderSources(sources, answer);
     linkify(b);
   } catch (e) {
+    tw.stop();
     const msg = /429|rate/i.test(e.message) ? 'The free AI model is busy right now. Please try again in a moment.' : e.message;
     b.innerHTML = (answer ? md(answer) : '') + `<p class="err">${esc(msg)}</p>`;
     if (!answer) history.pop();
