@@ -90,7 +90,7 @@ def describe(r: dict) -> str:
     if "bedrooms" in r:
         parts.append(f"{r['bedrooms']} bedroom(s)")
     if "size_raw" in r:
-        parts.append(f"area figure {r['size_raw']} sqm (from URL; decimal point may be missing)")
+        parts.append(f"size digits in URL '{r['size_raw']}' (decimal point stripped, so NOT a reliable sqm figure; exact area is on the listing page)")
     if "facing" in r:
         parts.append(f"facing {r['facing']}")
     if "street_width_m" in r:
@@ -124,11 +124,12 @@ class KnowledgeBase:
                             for c in items})
             main_url = next((c["url"] for c in items if c["what"] == "properties"), items[0]["url"])
             docs.append({
-                "source": "Wasalt", "title": f"Wasalt property categories in {name}", "url": main_url,
+                "source": "Wasalt", "title": f"{name} — Wasalt categories", "url": main_url,
                 "text": f"Wasalt (wasalt.sa) lists the following property categories in {name}, Saudi Arabia: "
                         + "; ".join(lines) + ". Browse: " + ", ".join(c["url"] for c in items[:6]),
             })
 
+        self.cat_urls = {c["slug"]: c["url"] for c in cats}
         self.stats_text = self._stats()
         docs.append({"source": "Wasalt", "title": "Wasalt listing statistics", "url": "https://wasalt.sa/en/",
                      "text": self.stats_text})
@@ -147,20 +148,43 @@ class KnowledgeBase:
         lines.append("Bedrooms: " + "; ".join(f"{t} {b}BR: {n:,}" for (t, b), n in beds.most_common(25)))
         return "\n".join(lines)
 
-    def listing_query(self, q: str, k: int = 8) -> str | None:
-        ql = q.lower()
-        if not re.search(r"wasalt|listing|saudi|ksa|riyadh|jeddah|dammam|for (sale|rent)|rent|buy|bedroom|villa|apartment|land|chalet", ql):
-            return None
+    def browse_url(self, purpose, ptype, beds) -> str:
+        """Best matching public Wasalt category page for a listing filter."""
+        plural = {"rest": "rest-houses", "studio": "studio-apartments", "land": "lands"}.get(ptype or "", f"{ptype}s" if ptype else "properties")
+        purpose_slug = purpose or "sale"
+        cands = []
+        if beds and ptype:
+            cands.append(f"{beds}-bedroom-{plural}-for-{purpose_slug}-in-saudi-arabia")
+        cands += [f"{plural}-for-{purpose_slug}-in-saudi-arabia", f"properties-for-{purpose_slug}-in-saudi-arabia"]
+        for c in cands:
+            if c in self.cat_urls:
+                return self.cat_urls[c]
+        return "https://wasalt.sa/en/"
+
+    @staticmethod
+    def _filters(text: str):
+        t = text.lower()
         purpose = None
-        if re.search(r"daily|booking|holiday|night", ql):
+        if re.search(r"daily|booking|holiday|night", t):
             purpose = "daily-rental"
-        elif re.search(r"\brent|lease|rental", ql):
+        elif re.search(r"\brent|lease|rental", t):
             purpose = "rent"
-        elif re.search(r"sale|buy|purchase", ql):
+        elif re.search(r"sale|buy|purchase", t):
             purpose = "sale"
-        ptype = next((v for w, v in TYPE_WORDS.items() if re.search(rf"\b{w}s?\b", ql)), None)
-        bm = re.search(r"(\d+)\s*-?\s*(?:bed|br\b|bhk|bedroom)", ql)
-        beds = int(bm[1]) if bm else None
+        ptype = next((v for w, v in TYPE_WORDS.items() if re.search(rf"\b{w}s?\b", t)), None)
+        bm = re.search(r"(\d+)\s*-?\s*(?:bed|br\b|bhk|bedroom)", t)
+        return purpose, ptype, (int(bm[1]) if bm else None)
+
+    def listing_query(self, q: str, history: str = "", k: int = 8) -> tuple[str, str] | None:
+        ql = q.lower()
+        if not re.search(r"wasalt|listing|saudi|ksa|riyadh|jeddah|dammam|for (sale|rent)|rent|buy|bedroom|villa|apartment|land|chalet|floor|building|studio", ql):
+            return None
+        purpose, ptype, beds = self._filters(q)
+        if history:  # follow-up: current question wins, history fills gaps
+            hp, ht, hb = self._filters(history)
+            purpose = purpose or hp
+            if not ptype:
+                ptype, beds = ht, beds if beds is not None else hb
         if not (purpose or ptype or beds):
             return None
         hits = [l for l in self.listings
@@ -170,36 +194,49 @@ class KnowledgeBase:
         hits.sort(key=lambda l: l["lastmod"], reverse=True)
         f = ", ".join(x for x in [purpose and f"purpose={purpose}", ptype and f"type={ptype}",
                                   beds is not None and f"bedrooms={beds}"] if x)
-        out = [f"Structured search of Wasalt listings ({f}): {len(hits):,} matching listings "
-               f"(listing URLs do not include city; sizes are taken from URLs and may be missing a decimal point)."]
+        browse = self.browse_url(purpose, ptype, beds)
+        out = [f"Browse on Wasalt: {browse}",
+               f"Structured search of Wasalt listings ({f}): {len(hits):,} matching listings "
+               f"(listing URLs do not include city; do not present URL size digits as square metres)."]
         out += [f"- {describe(h)}" for h in hits[:k]]
-        return "\n".join(out)
+        return "\n".join(out), browse
+
+    SMALLTALK = re.compile(r"^\W*(hi+|hello|hey|salam|salaam|marhaba|good (morning|afternoon|evening)|thanks?( you)?|thank u|ok(ay)?|cool|great|bye|who are you|what can you do|help)\W*$", re.I)
+    FOLLOWUP = re.compile(r"\b(it|its|that|this|those|these|they|them|there|more|also|same|what about|and)\b", re.I)
 
     def context(self, q: str, history: str = "") -> tuple[str, list[dict]]:
-        raw = self.index.search(q + " " + history, k=30)
-        per_url: Counter = Counter()
-        results = []
+        if self.SMALLTALK.match(q.strip()):
+            return "", []
+        # only blend in the previous question for short follow-ups ("what about villas?")
+        use_hist = history and len(tokenize(q)) <= 5 and self.FOLLOWUP.search(q)
+        query = q + (" " + history if use_hist else "")
         ql = q.lower()
         want = None
         if "wasalt" in ql and "darglobal" not in ql and "dar global" not in ql:
             want = "Wasalt"
         elif ("darglobal" in ql or "dar global" in ql) and "wasalt" not in ql:
             want = "DarGlobal"
-        if want:
-            raw = self.index.search(q + " " + history, k=80)
+        raw = self.index.search(query, k=80 if want else 30)
+        raw = [(sc, d) for sc, d in raw if not want or d["source"] == want]
+        top = raw[0][0] if raw else 0
+        per_url: Counter = Counter()
+        results = []
         for sc, d in raw:
-            if want and d["source"] != want:
-                continue
+            if sc < 0.45 * top:  # drop weak, loosely related matches
+                break
             if per_url[d["url"]] < 2:
                 per_url[d["url"]] += 1
-                results.append((sc, d))
+                results.append(d)
             if len(results) == 8:
                 break
         blocks, sources = [], []
-        lq = self.listing_query(q)
+        lq = self.listing_query(q, history if use_hist else "")
         if lq:
-            blocks.append(f"SOURCE: Wasalt listings database\n{lq}")
-        for i, (_, d) in enumerate(results, 1):
+            text, browse = lq
+            blocks.append(f"SOURCE: Wasalt listings database\nURL: {browse}\n{text}")
+            sources.append({"title": "Matching Wasalt listings", "url": browse, "source": "Wasalt"})
+            results = results[:4]  # the structured result is the main evidence
+        for d in results:
             blocks.append(f"SOURCE: {d['source']} — {d['title']}\nURL: {d['url']}\n{d['text']}")
             if d["url"] not in {s["url"] for s in sources}:
                 sources.append({"title": d["title"], "url": d["url"], "source": d["source"]})

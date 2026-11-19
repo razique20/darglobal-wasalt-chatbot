@@ -199,9 +199,11 @@ function linkify(bubble) {
   bubble.querySelectorAll('a').forEach(a => { a.target = '_blank'; a.rel = 'noopener'; });
 }
 
-function renderSources(sources) {
-  if (!sources.length) return '';
-  return '<div class="sources">' + sources.slice(0, 5).map(s => {
+function renderSources(sources, answer) {
+  // only show sources the answer actually links to
+  const used = sources.filter(s => answer.includes(s.url));
+  if (!used.length) return '';
+  return '<div class="sources">' + used.slice(0, 5).map(s => {
     const label = (s.title || s.url).replace(/\s*\|.*$/, '');
     return `<a class="src" href="${esc(s.url)}" target="_blank" rel="noopener"><i>${esc(s.source)}</i><em>${esc(label)}</em></a>`;
   }).join('') + '</div>';
@@ -233,7 +235,7 @@ async function ask(text) {
     }
     if (!answer) throw new Error('No answer came back — please try again.');
     history.push({ role: 'assistant', content: answer });
-    b.innerHTML = md(answer) + renderSources(sources);
+    b.innerHTML = md(answer) + renderSources(sources, answer);
     linkify(b);
   } catch (e) {
     const msg = /429|rate/i.test(e.message) ? 'The free AI model is busy right now. Please try again in a moment.' : e.message;
