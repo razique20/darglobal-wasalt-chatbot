@@ -28,7 +28,8 @@ def tokenize(text: str) -> list[str]:
 class BM25:
     def __init__(self, docs: list[dict], k1: float = 1.4, b: float = 0.75):
         self.docs, self.k1, self.b = docs, k1, b
-        self.tf = [Counter(tokenize(d["title"] + " " + d["title"] + " " + d["text"])) for d in docs]
+        self.tf = [Counter(tokenize(" ".join([d["title"], d["title"], d.get("keys", ""), d.get("keys", ""), d["text"]])))
+                   for d in docs]
         self.len = [sum(c.values()) for c in self.tf]
         self.avg = sum(self.len) / max(len(self.len), 1)
         df = Counter()
@@ -106,7 +107,11 @@ class KnowledgeBase:
         docs = []
         for p in dg:
             for i, c in enumerate(chunk(p["text"])):
-                docs.append({"source": "DarGlobal", "title": p["title"] or p["url"].rsplit("/", 1)[-1].replace("-", " ").title(), "url": p["url"], "text": c})
+                path = p["url"].split("co.uk", 1)[-1]
+                boost = "darglobal project " if p["section"] in ("page", "projects", "one-of-one", "rayana", "amaya", "trump-plaza") else ""
+                docs.append({"source": "DarGlobal", "url": p["url"], "text": c,
+                             "title": p["title"] or path.rsplit("/", 1)[-1].replace("-", " ").title(),
+                             "keys": boost + re.sub(r"[/_-]+", " ", path)})
 
         # Wasalt: one doc per city/area summarising which category pages exist
         by_loc: dict[str, list[dict]] = defaultdict(list)
@@ -171,7 +176,25 @@ class KnowledgeBase:
         return "\n".join(out)
 
     def context(self, q: str, history: str = "") -> tuple[str, list[dict]]:
-        results = self.index.search(q + " " + history, k=7)
+        raw = self.index.search(q + " " + history, k=30)
+        per_url: Counter = Counter()
+        results = []
+        ql = q.lower()
+        want = None
+        if "wasalt" in ql and "darglobal" not in ql and "dar global" not in ql:
+            want = "Wasalt"
+        elif ("darglobal" in ql or "dar global" in ql) and "wasalt" not in ql:
+            want = "DarGlobal"
+        if want:
+            raw = self.index.search(q + " " + history, k=80)
+        for sc, d in raw:
+            if want and d["source"] != want:
+                continue
+            if per_url[d["url"]] < 2:
+                per_url[d["url"]] += 1
+                results.append((sc, d))
+            if len(results) == 8:
+                break
         blocks, sources = [], []
         lq = self.listing_query(q)
         if lq:
