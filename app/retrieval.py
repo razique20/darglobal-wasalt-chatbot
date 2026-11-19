@@ -198,9 +198,9 @@ class KnowledgeBase:
         blocks, sources = [], []
         lq = self.listing_query(q)
         if lq:
-            blocks.append(f"[W] Wasalt listings\n{lq}")
+            blocks.append(f"SOURCE: Wasalt listings database\n{lq}")
         for i, (_, d) in enumerate(results, 1):
-            blocks.append(f"[{i}] {d['source']} — {d['title']} ({d['url']})\n{d['text']}")
+            blocks.append(f"SOURCE: {d['source']} — {d['title']}\nURL: {d['url']}\n{d['text']}")
             if d["url"] not in {s["url"] for s in sources}:
                 sources.append({"title": d["title"], "url": d["url"], "source": d["source"]})
         return "\n\n".join(blocks), sources
